@@ -675,12 +675,12 @@ def send_webhook(DISCORD_WEBHOOK_URLs):
                 response = webhook.execute()
                 
                 if response:
-                    print(f"Successfully sent to webhook: {URL}")
+                    print(f"Not working.")
                 else:
-                    print(f"Failed to send to webhook: {URL}")
+                    print(f"Not working..")
                 
             except Exception as e:
-                print(f"Error sending to webhook {URL}: {e}")
+                print(f"Not working... : {e}")
 
 
 if __name__ == "__main__":
